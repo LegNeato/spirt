@@ -6,9 +6,41 @@ use crate::{
     AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, DataInstDef, DataInstKind,
     DbgSrcLoc, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
-    Module, NodeDef, NodeKind, Region, RegionDef, RegionInputDecl, SelectionKind, Type, TypeDef,
-    TypeKind, TypeOrConst, Value, cfg, print,
+    Module, NodeDef, NodeKind, OrdAssertEq, Region, RegionDef, RegionInputDecl, SelectionKind,
+    Type, TypeDef, TypeKind, TypeOrConst, Value, cfg, print,
 };
+
+/// Extract the value of a constant if it's a compile-time constant.
+/// Returns None for spec constants or other constant kinds that can't be evaluated at compile time.
+fn get_constant_value(const_def: &ConstDef, wk: &spec::WellKnown) -> Option<u64> {
+    match &const_def.kind {
+        ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+            let (spv_inst, _) = &**spv_inst_and_const_inputs;
+            if spv_inst.opcode == wk.OpConstant && !spv_inst.imms.is_empty() {
+                // Extract the constant value from immediates
+                match &spv_inst.imms[0] {
+                    spv::Imm::Short(_, value) => Some(*value as u64),
+                    spv::Imm::LongStart(_, low) => {
+                        if spv_inst.imms.len() == 2 {
+                            match &spv_inst.imms[1] {
+                                spv::Imm::LongCont(_, high) => {
+                                    Some((*low as u64) | ((*high as u64) << 32))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None // Spec constants or other opcodes can't be evaluated
+            }
+        }
+        _ => None, // Other constant kinds don't have integer values
+    }
+}
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -477,7 +509,7 @@ impl Module {
                 Seq::EntryPoint
             } else if [
                 wk.OpExecutionMode,
-                wk.OpExecutionModeId, // FIXME(eddyb) not actually supported
+                wk.OpExecutionModeId,
                 wk.OpName,
                 wk.OpMemberName,
                 wk.OpDecorate,
@@ -491,40 +523,145 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 let target_id = inst.ids[0];
-                if inst.ids.len() > 1 {
-                    return Err(invalid("unsupported decoration with ID"));
-                }
 
-                match inst.imms[..] {
-                    // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
-                    [
-                        decoration @ spv::Imm::Short(..),
-                        ref name @ ..,
-                        spv::Imm::Short(lt_kind, linkage_type),
-                    ] if opcode == wk.OpDecorate
-                        && decoration == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
-                        && lt_kind == wk.LinkageType
-                        && [wk.Import, wk.Export].contains(&linkage_type) =>
-                    {
-                        let name = spv::extract_literal_string(name)
-                            .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
-                        let name = cx.intern(name);
+                // Handle OpExecutionModeId which can have multiple ID operands
+                if opcode == wk.OpExecutionModeId {
+                    if inst.ids.len() < 2 {
+                        return Err(invalid("OpExecutionModeId requires at least one ID operand"));
+                    }
 
-                        if linkage_type == wk.Import {
-                            pending_imports.insert(target_id, Import::LinkName(name));
-                        } else {
-                            pending_exports.push(Export::Linkage { name, target_id });
+                    // Validate the execution mode is one that accepts ID operands
+                    let mode = match inst.imms.first() {
+                        Some(spv::Imm::Short(_, mode)) => *mode,
+                        _ => {
+                            return Err(invalid(
+                                "OpExecutionModeId missing execution mode operand",
+                            ));
+                        }
+                    };
+
+                    // Only validate known standard modes that require non-zero unsigned integers.
+                    // Other modes (including vendor-specific ones) are allowed with basic validation.
+                    let known_modes_requiring_nonzero_uint = [wk.LocalSizeId, wk.LocalSizeHintId];
+                    let requires_strict_validation =
+                        known_modes_requiring_nonzero_uint.contains(&mode);
+
+                    // Collect the ID operands - they must be integer scalars
+                    // (can be constants, spec constants, etc.)
+                    let mut const_ids = SmallVec::new();
+                    for &id in &inst.ids[1..] {
+                        match id_defs.get(&id) {
+                            Some(IdDef::Const(ct)) => {
+                                let const_def = &cx[*ct];
+
+                                // Apply strict validation only for known modes
+                                if requires_strict_validation {
+                                    // Verify that the constant is an unsigned integer scalar
+                                    let is_unsigned_integer = match &cx[const_def.ty].kind {
+                                        TypeKind::SpvInst { spv_inst, .. }
+                                            if spv_inst.opcode == wk.OpTypeInt =>
+                                        {
+                                            // Check if it's unsigned (signedness = 0)
+                                            match spv_inst.imms.get(1) {
+                                                Some(spv::Imm::Short(_, 0)) => true,
+                                                _ => false,
+                                            }
+                                        }
+                                        _ => false,
+                                    };
+
+                                    if !is_unsigned_integer {
+                                        return Err(invalid(&format!(
+                                            "OpExecutionModeId ID operand {} must reference an unsigned integer constant for execution mode {}",
+                                            id, mode
+                                        )));
+                                    }
+
+                                    // Verify the constant value is greater than 0
+                                    // Note: For LocalSizeId/LocalSizeHintId, all dimensions must be > 0
+                                    if let Some(value) = get_constant_value(const_def, &wk) {
+                                        if value == 0 {
+                                            return Err(invalid(&format!(
+                                                "OpExecutionModeId ID operand {} must be greater than 0 for execution mode {}",
+                                                id, mode
+                                            )));
+                                        }
+                                    }
+                                    // For spec constants, we can't check the value at compile time
+                                }
+                                // For unknown/vendor modes, just push the constant
+                                const_ids.push(*ct);
+                            }
+                            Some(IdDef::Type(_)) => {
+                                return Err(invalid(&format!(
+                                    "OpExecutionModeId ID operand {} must reference a constant, \
+                                     but references a type",
+                                    id
+                                )));
+                            }
+                            Some(IdDef::Func(_)) => {
+                                return Err(invalid(&format!(
+                                    "OpExecutionModeId ID operand {} must reference a constant, \
+                                     but references a function",
+                                    id
+                                )));
+                            }
+                            Some(_) => {
+                                return Err(invalid(&format!(
+                                    "OpExecutionModeId ID operand {} must reference a constant",
+                                    id
+                                )));
+                            }
+                            None => {
+                                return Err(invalid(&format!(
+                                    "OpExecutionModeId ID operand {} not found in module",
+                                    id
+                                )));
+                            }
                         }
                     }
 
-                    _ => {
-                        pending_attrs
-                            .entry(target_id)
-                            .or_default()
-                            .attrs
-                            .insert(Attr::SpvAnnotation(inst.without_ids));
+                    pending_attrs
+                        .entry(target_id)
+                        .or_default()
+                        .attrs
+                        .insert(Attr::SpvExecutionModeId(inst.without_ids, OrdAssertEq(const_ids)));
+                } else if inst.ids.len() > 1 {
+                    return Err(invalid("unsupported decoration with ID"));
+                } else {
+                    // Handle regular decorations without ID operands
+                    match inst.imms[..] {
+                        // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
+                        [
+                            decoration @ spv::Imm::Short(..),
+                            ref name @ ..,
+                            spv::Imm::Short(lt_kind, linkage_type),
+                        ] if opcode == wk.OpDecorate
+                            && decoration
+                                == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
+                            && lt_kind == wk.LinkageType
+                            && [wk.Import, wk.Export].contains(&linkage_type) =>
+                        {
+                            let name = spv::extract_literal_string(name)
+                                .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                            let name = cx.intern(name);
+
+                            if linkage_type == wk.Import {
+                                pending_imports.insert(target_id, Import::LinkName(name));
+                            } else {
+                                pending_exports.push(Export::Linkage { name, target_id });
+                            }
+                        }
+
+                        _ => {
+                            pending_attrs
+                                .entry(target_id)
+                                .or_default()
+                                .attrs
+                                .insert(Attr::SpvAnnotation(inst.without_ids));
+                        }
                     }
-                };
+                }
 
                 if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
                     Seq::ExecutionMode

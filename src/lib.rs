@@ -403,6 +403,15 @@ pub enum Attr {
 
     SpvAnnotation(spv::Inst),
 
+    /// SPIR-V execution mode with ID operands (e.g. `OpExecutionModeId`).
+    ///
+    /// The `spv::Inst` contains the execution mode and any immediate operands,
+    /// while the `SmallVec` contains the ID operands that must reference constants.
+    ///
+    /// Used for execution modes like `LocalSizeId` where the workgroup dimensions
+    /// are specified via constant IDs rather than literal values.
+    SpvExecutionModeId(spv::Inst, OrdAssertEq<SmallVec<[Const; 2]>>),
+
     /// Some SPIR-V instructions, like `OpFunction`, take a bitflags operand
     /// that is effectively an optimization over using `OpDecorate`.
     //

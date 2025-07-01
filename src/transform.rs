@@ -374,6 +374,14 @@ impl InnerTransform for Attr {
                     } => QPtrAttr::Usage(OrdAssertEq(usage))),
                 }
             } => Attr::QPtr(attr)),
+
+            Attr::SpvExecutionModeId(ref inst, OrdAssertEq(ref const_ids)) => transform!({
+                const_ids -> Transformed::map_iter(
+                    const_ids.iter(),
+                    |&ct| transformer.transform_const_use(ct),
+                )
+                .map(|transformed_vec| transformed_vec.collect()),
+            } => Attr::SpvExecutionModeId(inst.clone(), OrdAssertEq(const_ids))),
         }
     }
 }

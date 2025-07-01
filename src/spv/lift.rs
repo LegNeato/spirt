@@ -196,13 +196,18 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
     }
     fn visit_attr(&mut self, attr: &Attr) {
-        match *attr {
+        match attr {
             Attr::Diagnostics(_)
             | Attr::QPtr(_)
             | Attr::SpvAnnotation { .. }
             | Attr::SpvBitflagsOperand(_) => {}
-            Attr::DbgSrcLoc(OrdAssertEq(DbgSrcLoc { file_path, .. })) => {
+            &Attr::DbgSrcLoc(OrdAssertEq(DbgSrcLoc { file_path, .. })) => {
                 self.debug_strings.insert(&self.cx[file_path]);
+            }
+            &Attr::SpvExecutionModeId(_, OrdAssertEq(ref const_ids)) => {
+                for ct in const_ids.iter() {
+                    self.globals.insert(Global::Const(*ct));
+                }
             }
         }
         attr.inner_visit_with(self);
@@ -1526,6 +1531,27 @@ impl Module {
                         } else {
                             decoration_insts.push(inst);
                         }
+                    }
+                    Attr::SpvExecutionModeId(inst, OrdAssertEq(const_ids)) => {
+                        let target_id = result_id.expect(
+                            "FIXME: it shouldn't be possible to attach \
+                                 attributes to instructions without an output",
+                        );
+
+                        // Convert constants to their SPIR-V IDs
+                        let mut id_list = vec![target_id];
+                        for &ct in const_ids {
+                            id_list.push(ids.globals[&Global::Const(ct)]);
+                        }
+
+                        let inst = spv::InstWithIds {
+                            without_ids: inst.clone(),
+                            result_type_id: None,
+                            result_id: None,
+                            ids: id_list.into(),
+                        };
+
+                        execution_mode_insts.push(inst);
                     }
                 }
 

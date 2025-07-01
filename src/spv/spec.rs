@@ -178,6 +178,7 @@ def_well_known! {
         LinkageType,
         SelectionControl,
         LoopControl,
+        ExecutionMode,
 
         LiteralInteger,
         LiteralExtInstInteger,
@@ -213,6 +214,12 @@ def_well_known! {
     linkage_type: u32 = [
         Import,
         Export,
+    ],
+    execution_mode: u32 = [
+        LocalSize,
+        LocalSizeId,
+        LocalSizeHint,
+        LocalSizeHintId,
     ],
 }
 
@@ -1036,6 +1043,10 @@ impl Spec {
             OperandKindDef::ValueEnum { variants } => variants,
             _ => unreachable!(),
         };
+        let execution_modes = match &operand_kinds[operand_kinds.lookup("ExecutionMode").unwrap()] {
+            OperandKindDef::ValueEnum { variants } => variants,
+            _ => unreachable!(),
+        };
 
         // FIXME(eddyb) if this is computed earlier, `IdResultType` and `IdResult`
         // wouldn't be looked up twice - but for now, this is mildly cleaner.
@@ -1046,6 +1057,7 @@ impl Spec {
             storage_class: |name| storage_classes.lookup(name).unwrap().into(),
             decoration: |name| decorations.lookup(name).unwrap().into(),
             linkage_type: |name| linkage_types.lookup(name).unwrap().into(),
+            execution_mode: |name| execution_modes.lookup(name).unwrap().into(),
         });
 
         Self {

@@ -253,6 +253,12 @@ impl InnerVisit for Attr {
 
                 QPtrAttr::Usage(usage) => usage.0.inner_visit_with(visitor),
             },
+
+            Attr::SpvExecutionModeId(_inst, OrdAssertEq(const_ids)) => {
+                for &ct in const_ids {
+                    visitor.visit_const_use(ct);
+                }
+            }
         }
     }
 }

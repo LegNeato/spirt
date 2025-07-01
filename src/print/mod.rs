@@ -3008,6 +3008,23 @@ impl Print for Attr {
                     printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None])
                 }
             }
+            Attr::SpvExecutionModeId(spv::Inst { opcode: _, imms }, OrdAssertEq(const_ids)) => {
+                // Display OpExecutionModeId similar to OpExecutionMode, showing mode and constants
+                let mut fragments = vec![];
+
+                // Add the execution mode operand
+                if let Some(mode_imm) = imms.first() {
+                    fragments.push(printer.pretty_spv_operand_from_imms([*mode_imm]));
+                }
+
+                // Add the constant IDs
+                for &ct in const_ids {
+                    fragments.push(" ".into());
+                    fragments.push(ct.print(printer));
+                }
+
+                pretty::Fragment::new(fragments)
+            }
             &Attr::SpvBitflagsOperand(imm) => printer.pretty_spv_operand_from_imms([imm]),
         };
         pretty::Fragment::new([
