@@ -1512,10 +1512,7 @@ impl Module {
                     | Attr::QPtr(_)
                     | Attr::SpvBitflagsOperand(_) => {}
                     Attr::SpvAnnotation(inst @ spv::Inst { opcode, .. }) => {
-                        let target_id = result_id.expect(
-                            "FIXME: it shouldn't be possible to attach \
-                                 attributes to instructions without an output",
-                        );
+                        let target_id = result_id.expect("instruction has a result");
 
                         let inst = spv::InstWithIds {
                             without_ids: inst.clone(),
@@ -1533,10 +1530,7 @@ impl Module {
                         }
                     }
                     Attr::SpvExecutionModeId(inst, OrdAssertEq(const_ids)) => {
-                        let target_id = result_id.expect(
-                            "FIXME: it shouldn't be possible to attach \
-                                 attributes to instructions without an output",
-                        );
+                        let target_id = result_id.expect("instruction has a result");
 
                         // Convert constants to their SPIR-V IDs
                         let mut id_list = vec![target_id];
