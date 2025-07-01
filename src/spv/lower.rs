@@ -918,7 +918,6 @@ impl Module {
                     Some(IdDef::Const(ct)) => {
                         let const_def = &cx[*ct];
 
-                        // Apply strict validation only for known modes
                         if requires_strict_validation {
                             // Verify that the constant is an unsigned integer scalar
                             if !is_unsigned_integer_type(&cx[const_def.ty], &wk) {
@@ -928,8 +927,7 @@ impl Module {
                                 )));
                             }
 
-                            // Verify the constant value is greater than 0
-                            // Note: For LocalSizeId/LocalSizeHintId, all dimensions must be > 0
+                            // Verify the constant value is not 0
                             if let Some(value) = get_constant_value(const_def, &wk) {
                                 if value == 0 {
                                     return Err(invalid(&format!(
@@ -938,7 +936,6 @@ impl Module {
                                     )));
                                 }
                             }
-                            // For spec constants, we can't check the value at compile time
                         }
                         resolved_const_ids.push(*ct);
                     }
@@ -1973,7 +1970,6 @@ mod tests {
         let module = Module::lower_from_spv_bytes(cx, bytemuck::cast_slice(&spirv).to_vec())
             .expect("Failed to lower SPIR-V module with OpExecutionModeId");
 
-        // Verify the module was created successfully
         assert_eq!(module.exports.len(), 1);
     }
 
@@ -2021,9 +2017,6 @@ mod tests {
         }
     }
 
-    // NOTE: Cannot test vendor-specific execution modes because the SPIR-V parser
-    // validates enum values and rejects unknown execution mode values
-
     #[test]
     fn test_execution_mode_id_local_size_hint_id() {
         let cx = Rc::new(Context::new());
@@ -2056,9 +2049,12 @@ mod tests {
         assert_eq!(module.exports.len(), 1);
     }
 
-    /// Helper to create SPIR-V with a specialization constant
-    fn create_spirv_with_spec_constant_execution_mode() -> Vec<u32> {
-        vec![
+    #[test]
+    fn test_execution_mode_id_spec_constant() {
+        let cx = Rc::new(Context::new());
+
+        // Test with specialization constants (which can't be validated at compile time)
+        let spirv = vec![
             // Header
             0x07230203, // Magic
             0x00010300, // Version 1.3
@@ -2124,15 +2120,7 @@ mod tests {
             (1u32 << 16) | 253,
             // OpFunctionEnd
             (1u32 << 16) | 56,
-        ]
-    }
-
-    #[test]
-    fn test_execution_mode_id_spec_constant() {
-        let cx = Rc::new(Context::new());
-
-        // Test with specialization constants (which can't be validated at compile time)
-        let spirv = create_spirv_with_spec_constant_execution_mode();
+        ];
 
         let module = Module::lower_from_spv_bytes(cx, bytemuck::cast_slice(&spirv).to_vec())
             .expect("Failed to lower SPIR-V with spec constants in OpExecutionModeId");
